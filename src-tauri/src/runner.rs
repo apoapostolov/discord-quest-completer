@@ -1,7 +1,6 @@
-use discord_sdk::activity::{ActivityBuilder, ActivityKind};
-use std::{fmt::Error, io::ErrorKind, ops::Deref};
+use discord_sdk::activity::ActivityBuilder;
 
-use crate::rpc::{self, Client};
+use crate::rpc::{self, ds};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -22,10 +21,10 @@ pub struct CreateActivityResult {
     pub app_id: u64,
 }
 
-fn to_app_id(app_id: &str) -> Result<u64, std::num::ParseIntError> {
+fn to_app_id(app_id: &str) -> Result<u64, String> {
     app_id.parse::<u64>().map_err(|e| {
         eprintln!("Failed to parse app_id: {}", e);
-        std::num::ParseIntError::from(e)
+        format!("Failed to parse app_id: {}", e)
     })
 }
 
@@ -52,60 +51,58 @@ pub fn create_activity(activity_json: String) -> Result<CreateActivityResult, St
     let activity_kind = activity.activity_kind.unwrap_or(0);
 
     let mut rp: discord_sdk::activity::ActivityBuilder =
-        rpc::ds::activity::ActivityBuilder::default();
+        ds::activity::ActivityBuilder::default();
 
-    if Some(activity_kind) != None {
-        if activity_kind == 0 {
-            rp = rp.kind(rpc::ds::activity::ActivityKind::Playing);
-        } else if activity_kind == 2 {
-            rp = rp.kind(rpc::ds::activity::ActivityKind::Listening);
-        } else if activity_kind == 3 {
-            rp = rp.kind(rpc::ds::activity::ActivityKind::Watching);
-        } else if activity_kind == 5 {
-            rp = rp.kind(rpc::ds::activity::ActivityKind::Competing);
-        } else {
-            rp = rp.kind(rpc::ds::activity::ActivityKind::Playing);
-        }
+    match activity_kind {
+        0 => rp = rp.kind(ds::activity::ActivityKind::Playing),
+        2 => rp = rp.kind(ds::activity::ActivityKind::Listening),
+        3 => rp = rp.kind(ds::activity::ActivityKind::Watching),
+        5 => rp = rp.kind(ds::activity::ActivityKind::Competing),
+        _ => rp = rp.kind(ds::activity::ActivityKind::Playing),
     }
 
-    // details
     if !details.is_empty() {
         rp = rp.details(details);
     }
 
-    // state
     if !state.is_empty() {
         rp = rp.state(state);
     }
 
-    // timestamp
     if let Some(ts) = timestamp {
         rp = rp.start_timestamp(ts as i64);
     }
 
-    // large_image_key
     if !large_image_key.is_empty() {
         rp = rp
-            .assets(rpc::ds::activity::Assets::default().large(&large_image_key, large_image_text));
+            .assets(ds::activity::Assets::default().large(&large_image_key, large_image_text));
     }
 
     Ok(CreateActivityResult {
         activity: rp,
-        app_id: app_id,
+        app_id,
     })
 }
 
-pub async fn set_activity(activity_json: String) -> Result<Client, String> {
-    let activity_result: CreateActivityResult = create_activity(activity_json)?;
-    let app_id: i64 = activity_result.app_id as i64;
-    let activity_builder = activity_result.activity;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let client = rpc::make_client(app_id, rpc::ds::Subscriptions::ACTIVITY).await;
-    client
-        .discord
-        .update_activity(activity_builder)
-        .await
-        .map_err(|e| format!("Failed to update activity: {}", e))?;
+    #[test]
+    fn rejects_malformed_json() {
+        assert!(parse_activity_json("not json").is_err());
+    }
 
-    Ok(client)
+    #[test]
+    fn rejects_invalid_app_id() {
+        let json = r#"{"app_id":"not-a-number"}"#;
+        assert!(create_activity(json.to_string()).is_err());
+    }
+
+    #[test]
+    fn builds_minimal_activity() {
+        let json = r#"{"app_id":"12345"}"#;
+        let result = create_activity(json.to_string()).unwrap();
+        assert_eq!(result.app_id, 12345);
+    }
 }

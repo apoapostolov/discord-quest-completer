@@ -1,5 +1,5 @@
 import { createGlobalState } from '@vueuse/core'
-import { computed, ComputedRef, Ref, ShallowRef, shallowRef } from 'vue'
+import { computed, ComputedRef, Ref, ShallowRef, ref, shallowRef } from 'vue'
 
 export const Pages = {
     HOME: 'home',
@@ -17,7 +17,7 @@ export interface UseGlobalStateReturn {
     doubleCount: ComputedRef<number>,
     setPage: (newPage: Pages) => void,
     increment: () => void,
-    logs: ShallowRef<AppLogObject[]>,
+    logs: Ref<AppLogObject[]>,
     addLog: {
         (type: 'info' | 'error' | 'warning' | 'debug', newLog: string): void;
         (newLog: string): void;
@@ -29,7 +29,7 @@ export const useGlobalState = createGlobalState(
     // state
     const page = shallowRef<Pages>(Pages.HOME)
 
-    const logs = shallowRef<AppLogObject[]>([])
+    const logs = ref<AppLogObject[]>([])
 
     const count = shallowRef(0)
 

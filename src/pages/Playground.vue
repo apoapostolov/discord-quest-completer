@@ -1,10 +1,11 @@
 <template>
     <div class="p-4 space-y-4 container mx-auto">
         <button class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
-            @click="discordTest">Discord Test
-
-            connected: {{ isConnected }}
-        </button>
+            :disabled="isChecking" @click="discordTest">{{ isChecking ? 'Checking...' : 'Check Discord IPC availability' }}</button>
+        <p class="text-gray-700 dark:text-gray-300">
+            {{ ipcAvailable === null ? 'Not checked or check failed.' : (ipcAvailable ? 'Discord IPC is available.' : 'Discord IPC is not available.') }}
+            This read-only check does not connect an application or publish activity.
+        </p>
 
         <!-- Logs Section -->
         <div class="mt-4 p-4 border rounded text-gray-700 dark:text-gray-300 dark:border-gray-600">
@@ -42,73 +43,28 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
 import { useGlobalState } from '@/composables/app-state';
 
-const ActivityKind = {
-    Playing: 0,
-    Listening: 2,
-    Watching: 3,
-    Competing: 5
-} as const;
-
-const isConnected = ref(false);
-
+const ipcAvailable = ref<boolean | null>(null);
+const isChecking = ref(false);
 const { logs, addLog, clearLogs } = useGlobalState();
 
-function discordTest() {
-
-    const appIdCode = '1361728268088381706';
-
-    if (isConnected.value) {
-        console.log('Disconnecting from Discord');
-        emit('event_disconnect');
-        isConnected.value = false;
-        return;
+async function discordTest() {
+    if (isChecking.value) return;
+    isChecking.value = true;
+    try {
+        ipcAvailable.value = await invoke<boolean>('check_discord_connection');
+        addLog('info', ipcAvailable.value ? 'Discord IPC is available.' : 'Discord IPC is not available.');
+    } catch (error) {
+        ipcAvailable.value = null;
+        addLog('error', 'Discord IPC check failed: ' + String(error));
+    } finally {
+        isChecking.value = false;
     }
-
-    invoke('connect_to_discord_rpc_3', {
-        activity_json: JSON.stringify({
-            app_id: appIdCode,
-            details: 'Jhabol',
-            // details: 'xmonad -> dwm -> spectrwm -> i3 -> bspwm -> qtile -> hyrpland -> xfce -> gnome -> sway',
-            state: "/jhabol",
-            activity_kind: ActivityKind.Watching,
-            timestamp: createAgoTimestamp('1h 30m')
-        }),
-        action: 'connect',
-    });
-    isConnected.value = true;
 }
 
-// function to create timestamp behind current time.
-// example: input is `4h 30m` means timestamp should start from 4 hours and 30 minutes behind current time.
-function createAgoTimestamp(input: string) {
-    const time = input.split(' ');
-    let hours = 0;
-    let minutes = 0;
-
-    for (let i = 0; i < time.length; i++) {
-        if (time[i].includes('h')) {
-            hours = parseInt(time[i]);
-        } else if (time[i].includes('m')) {
-            minutes = parseInt(time[i]);
-        }
-    }
-
-    const date = new Date();
-    date.setHours(date.getHours() - hours);
-    date.setMinutes(date.getMinutes() - minutes);
-
-    return Math.floor(date.getTime() / 1000);
-}
-
-
-onMounted(() => {
-
-})
 
 </script>
 

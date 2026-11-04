@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, useTemplateRef, shallowRef, provide, nextTick, triggerRef } from 'vue';
 // import gameListData from '../assets/gamelist.json';
-import { onClickOutside, refDebounced, tryOnMounted } from '@vueuse/core';
+import { onClickOutside, refDebounced, tryOnMounted, tryOnUnmounted, useIntervalFn } from '@vueuse/core';
 import { useFuse } from '@vueuse/integrations/useFuse'
 import { invoke } from '@tauri-apps/api/core';
 import { randomString } from '@/utils/random-string';
@@ -11,7 +11,6 @@ import { isEmpty } from 'lodash-es';
 import GameExecutables from '@/components/GameExecutables.vue';
 import { GameActionsKey } from '@/constants/constants';
 import { path } from '@tauri-apps/api';
-import { emit } from '@tauri-apps/api/event';
 import { useFetchGameList } from '@/composables/fetch-gamelist';
 import { UseFuseOptions } from '@vueuse/integrations';
 import Fuse from 'fuse.js';
@@ -50,6 +49,7 @@ const dialogMessage = ref('');
 const isDialogOpen = ref(false);
 const dialogKey = ref<DialogKey>('none')
 const isConnectedToRPC = ref(false);
+const rpcGameId = ref<string | null>(null);
 const isConnecting = ref(false);
 
 // Search functionality
@@ -61,6 +61,44 @@ const isOnSearchResults = ref(false);
 
 // Game status
 const currentlyPlaying = ref<string | null>(null);
+
+async function reconcileRunningProcesses() {
+    try {
+        const runningPids = await invoke('get_running_processes') as number[];
+        const runningSet = new Set(runningPids);
+        for (const game of gameList.value) {
+            let anyRunning = false;
+            for (const exe of game.executables) {
+                const stillRunning = exe.process_id !== undefined && runningSet.has(exe.process_id);
+                exe.is_running = stillRunning;
+                if (!stillRunning) exe.process_id = undefined;
+                if (stillRunning) anyRunning = true;
+            }
+            const activityRunning = isConnectedToRPC.value && rpcGameId.value === game.id;
+            game.is_running = anyRunning || activityRunning;
+            if (!game.is_running && currentlyPlaying.value === game.id) {
+                currentlyPlaying.value = null;
+            }
+        }
+    } catch (error) {
+        // Failed reconciliation must not falsely clear tracked state.
+        console.error('Failed to reconcile running processes:', error);
+    }
+}
+
+const { pause: stopProcessReconciliation, resume: startProcessReconciliation } = useIntervalFn(
+    reconcileRunningProcesses,
+    1000,
+    { immediate: false, immediateCallback: true }
+);
+
+tryOnMounted(() => {
+    startProcessReconciliation();
+});
+
+tryOnUnmounted(() => {
+    stopProcessReconciliation();
+});
 
 
 onClickOutside(searchResultContainerRef, () => {
@@ -219,12 +257,11 @@ async function installAndPlay({game, executable}: {game: Game, executable: GameE
     if (!game) {
         return;
     }
-    const gameCreated = await createDummyGame(game, executable);
-    if (gameCreated) {
-        playGame({game, executable});
-    } else {
-        console.error('Failed to create game');
-        addLog('error', 'Failed to create game');
+    try {
+        const gameCreated = await createDummyGame(game, executable);
+        if (gameCreated) await playGame({game, executable});
+    } catch (error) {
+        addLog('error', 'Failed to create game: ' + String(error));
     }
 }
 // Play game function
@@ -237,7 +274,6 @@ async function playGame({game, executable}: {game: Game, executable: GameExecuta
         console.log(`Playing game: ${gameUid}`);
         addLog('info', `Playing game: ${game.name}`);
         addLog('info', `Executable: ${executable.name}`);
-        currentlyPlaying.value = game.id;
         // find the game in the list
         const gameToPlay = gameList.value.find(g => g.uid === gameUid);
         const executableItem = gameToPlay?.executables.find(exe => exe.name === executable.name);
@@ -248,16 +284,18 @@ async function playGame({game, executable}: {game: Game, executable: GameExecuta
                 executable_name: executable.filename,
                 path_len: executable.segments,
                 app_id: Number(gameToPlay.id),
-                exec_path: path.join(executable.path!, executable.filename!),
             } 
-            await invoke('run_background_process', payload);
+            const processId = await invoke('run_background_process', payload) as number;
+            executableItem.process_id = processId;
             gameToPlay.is_running = true;
             executableItem.is_running = true; 
+            currentlyPlaying.value = game.id;
         }
         // In a real app, this would invoke a Tauri command to launch the game
        
     } catch (error) {
         console.error('Failed to launch game:', error);
+        addLog('error', 'Failed to launch game: ' + ((error instanceof Error) ? error.message : String(error)));
     }
 }
 
@@ -268,28 +306,30 @@ async function stopPlaying({game, executable}: {game: Game, executable: GameExec
     }
     console.log('Stopped playing game');
     const gameUid = game.uid;
-    
-    currentlyPlaying.value = null;
 
     const gameToPlay = gameList.value.find(g => g.uid === gameUid);
     const executableItem = gameToPlay?.executables.find(exe => exe.name === executable.name);
     if (gameToPlay && executableItem) {
         try {
+            if (executableItem.process_id === undefined) {
+                throw new Error('No tracked process id for executable');
+            }
             await invoke('stop_process', {
-                exec_name: executable.filename!
+                process_id: executableItem.process_id
             })
             addLog('info', `Stopped game process: ${game.name}`);
             addLog('info', `Stopped Executable: ${executable.name}`);
+            gameToPlay.is_running = false;
+            executableItem.is_running = false;
+            executableItem.process_id = undefined;
+            if (currentlyPlaying.value === gameToPlay.id) {
+                currentlyPlaying.value = null;
+            }
         } catch (error) {
             console.error('Failed to stop game process:', error);
             const errorMessage = (error instanceof Error) ? error.message : String(error);
-            addLog('error', 'Failed to stop game process' + errorMessage);
-            // Even if stopping fails, we still update the state
-            gameToPlay.is_running = false;
-            executableItem.is_running = false;
-        } finally {
-            gameToPlay.is_running = false;
-            executableItem.is_running = false;
+            addLog('error', 'Failed to stop game process: ' + errorMessage);
+            // Failed stop keeps tracked state; reconciliation will correct it naturally.
         }
     }
 }
@@ -307,19 +347,21 @@ async function handleTestRPC(game: Game | null) {
         return;
     }
     if (state === 'disconnect' || isConnecting.value) {
-        // await invoke('connect_to_discord_rpc_2', { app_id: "0", discord_state: "disconnect" })
-        // invoke('connect_to_discord_rpc_3', {
-        //     activity_json: JSON.stringify({
-        //         app_id: selectedGame.value?.id
-        //     }),
-        //     action: 'disconnect',
-        // })
-        emit('event_disconnect');
-        
-        isConnectedToRPC.value = false;
-        game!.is_running = false;
-        currentlyPlaying.value = null;
-        isConnecting.value = false;
+        try {
+            await invoke('disconnect_from_discord_rpc');
+            isConnectedToRPC.value = false;
+            rpcGameId.value = null;
+            for (const item of gameList.value) {
+                item.is_running = item.executables.some(executable => executable.is_running);
+            }
+            if (!gameList.value.some(item => item.id === currentlyPlaying.value && item.is_running)) {
+                currentlyPlaying.value = null;
+            }
+            isConnecting.value = false;
+        } catch (error) {
+            console.error('Failed to disconnect from Discord RPC:', error);
+            addLog('error', 'Failed to disconnect from Discord RPC: ' + ((error instanceof Error) ? error.message : String(error)));
+        }
         return;
     }
     showDialog('rpc_message_1');
@@ -331,24 +373,28 @@ async function continueRPCRisk(game: Game | null) {
     }
     const gameUid = game.uid;
     const gameToTest = gameList.value.find(g => g.uid === gameUid);
-    if (gameToTest) {
-        console.log('Testing RPC for game:', gameToTest);
-        isConnecting.value = true;
-        // invoke('connect_to_discord_rpc_2', { app_id: gameToTest.id, discord_state: "connect" })
-        invoke('connect_to_discord_rpc_3', {
+    if (!gameToTest) {
+        return;
+    }
+    console.log('Testing RPC for game:', gameToTest);
+    isConnecting.value = true;
+    hideDialog();
+    try {
+        await invoke('connect_to_discord_rpc_3', {
             activity_json: JSON.stringify({
                 app_id: gameToTest.id,
             }),
             action: 'connect',
-        })
-        .then(() => {
-            isConnectedToRPC.value = true;
-            gameToTest.is_running = true;
-            currentlyPlaying.value = gameToTest.id;
-            isConnecting.value = false;
-        })
-
-        hideDialog();
+        });
+        isConnectedToRPC.value = true;
+        rpcGameId.value = gameToTest.id;
+        gameToTest.is_running = true;
+        currentlyPlaying.value = gameToTest.id;
+    } catch (error) {
+        console.error('Failed to connect to Discord RPC:', error);
+        addLog('error', 'Failed to connect to Discord RPC: ' + ((error instanceof Error) ? error.message : String(error)));
+    } finally {
+        isConnecting.value = false;
     }
 }
 

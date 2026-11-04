@@ -63,7 +63,7 @@ const filteredExecutables = computed(() => {
     return props.game.executables.filter(executable => {
         // currently no support for linux and darwin
         return executable.os !== EXECUTABLE_OS.LINUX && executable.os !== EXECUTABLE_OS.DARWIN
-            && !isValidPath(executable.name);
+            && isValidExecutableName(executable.name);
     });
 });
 
@@ -95,9 +95,13 @@ function getFilename(executable: GameExecutable) {
     return last;
 }
 
-function isValidPath(path: string) {
-    const illegalChars = ['>', '<', ':', '"', '|', '?', '*'];
-    return illegalChars.some(char => path.includes(char));
+function isValidExecutableName(name: string) {
+    if (!name || /^[\\/]/.test(name)) return false;
+    return name.split(/[\\/]/).every(component => {
+        if (!component || component === '.' || component === '..' || /[. ]$/.test(component)) return false;
+        if (/[<>:"|?*\x00-\x1f]/.test(component)) return false;
+        return !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(component);
+    });
 }
 
 function handleLaunch(executable: GameExecutable) {
@@ -107,10 +111,10 @@ function handleLaunch(executable: GameExecutable) {
         emit('stop', {
             game: props.game,
             executable: {
+                ...executable,
                 path: getExecutablePath(executable),
                 segments: splitExecutableName(executable).length,
-                filename: getFilename(executable),
-                ...executable
+                filename: getFilename(executable)
             },
         });
     } else {
@@ -118,20 +122,20 @@ function handleLaunch(executable: GameExecutable) {
             emit('install_and_play', {
                 game: props.game,
                 executable: {
+                    ...executable,
                     path: getExecutablePath(executable),
                     segments: splitExecutableName(executable).length,
-                    filename: getFilename(executable),
-                    ...executable
+                    filename: getFilename(executable)
                 },
             });
         } else {
             emit('play', {
                 game: props.game,
                 executable: {
+                    ...executable,
                     path: getExecutablePath(executable),
                     segments: splitExecutableName(executable).length,
-                    filename: getFilename(executable),
-                    ...executable
+                    filename: getFilename(executable)
                 },
             });
         }

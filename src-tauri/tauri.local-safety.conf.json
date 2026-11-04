@@ -1,0 +1,14 @@
+{
+  "productName": "Discord Quest Completer Local",
+  "version": "25.10.7",
+  "identifier": "me.markterence.discordquestcompleter.localsafety",
+  "app": {
+    "windows": [
+      {
+        "title": "Discord Quest Completer - Local Safety Build",
+        "width": 800,
+        "height": 600
+      }
+    ]
+  }
+}

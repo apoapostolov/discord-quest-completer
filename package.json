@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "node --test tests/frontend-safety.test.cjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:runner:win": "cd ./src-win && cargo build --release && cd ..",

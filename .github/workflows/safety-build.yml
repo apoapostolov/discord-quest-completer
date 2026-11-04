@@ -1,0 +1,95 @@
+name: Local safety build
+
+on:
+  push:
+    branches: ['local/safety-hardening']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safety-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.3
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-win -> target
+            src-tauri -> target
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare checksummed upstream fallback catalog
+        run: node scripts/prepare-catalog.mjs
+      - name: Frontend regressions and production build
+        shell: pwsh
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build unchanged Windows runner from source
+        shell: pwsh
+        run: |
+          cargo build --release --locked --manifest-path src-win/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force src-tauri/resources | Out-Null
+          Copy-Item src-win/target/release/src-win.exe src-tauri/resources/src-win.exe
+      - name: Native safety regressions
+        shell: pwsh
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build portable local app from this exact revision
+        shell: pwsh
+        run: |
+          pnpm exec tauri build --ci --no-bundle --config src-tauri/tauri.local-safety.conf.json -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force portable/data, portable/resources | Out-Null
+          Copy-Item src-tauri/target/release/discord-quest-completer.exe portable/
+          Copy-Item src-win/target/release/src-win.exe portable/data/
+          Copy-Item src-tauri/icons/icon.ico portable/resources/
+          # Metadata uses runner-provided environment values, not event text interpolated into commands.
+          @{ repository = $env:GITHUB_REPOSITORY; commit = $env:GITHUB_SHA; run_url = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"; flavor = 'local-safety'; runner = 'built from source'; versions_unchanged = $true } | ConvertTo-Json | Set-Content portable/build-info.json -Encoding utf8
+          @('discord-quest-completer.exe', 'data/src-win.exe', 'resources/icon.ico', 'build-info.json') | ForEach-Object {
+            $hash = (Get-FileHash (Join-Path portable $_) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $_"
+          } | Set-Content portable/SHA256SUMS.txt -Encoding ascii
+      - name: Portable startup smoke test without Discord activity
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "$pwd/portable/discord-quest-completer.exe" -WorkingDirectory "$pwd/portable" -WindowStyle Hidden -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            if ($process.HasExited) { throw "Portable application exited during startup with code $($process.ExitCode)" }
+            Write-Output "Portable application remained running through startup. No game or RPC publishing command was invoked."
+          } finally {
+            if (-not $process.HasExited) {
+              $null = $process.CloseMainWindow()
+              if (-not $process.WaitForExit(5000)) { $process.Kill() }
+            }
+          }
+      - name: Upload verified portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-quest-completer-local-safety-${{ github.sha }}
+          path: portable/
+          retention-days: 7
+          if-no-files-found: error
